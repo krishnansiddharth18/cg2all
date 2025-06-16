@@ -34,7 +34,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
-def split_trajectory_into_chunks(pdb_fn, dcd_fn, chunk_size, temp_dir, output_basename,dcd_last):
+def split_trajectory_into_chunks(pdb_fn, dcd_fn, chunk_size, temp_dir, output_basename,dcd_last,step_size=1):
     """
     Split a large trajectory into smaller chunks and save as temporary files.
     
@@ -56,15 +56,16 @@ def split_trajectory_into_chunks(pdb_fn, dcd_fn, chunk_size, temp_dir, output_ba
          total_frames = len(full_traj)
     else:
          total_frames = int(dcd_last)
-    my_traj = full_traj[:total_frames]
-    print(f"Total frames: {total_frames}")
+    my_traj = full_traj[:total_frames:step_size]
+    total_frames_after_step = len(my_traj)
+    print(f"Total frames: {total_frames}. After skipping {step_size} frames: {total_frames_after_step")
     print(f"Splitting into chunks of {chunk_size} frames...")
     
     chunk_files = []
     
     
-    for start_frame in range(0, total_frames, chunk_size):
-        end_frame = min(start_frame + chunk_size, total_frames)
+    for start_frame in range(0, total_frames_after_step, chunk_size):
+        end_frame = min(start_frame + chunk_size, total_frames_after_step)
         chunk_idx = start_frame // chunk_size
         
         print(f"Processing chunk {chunk_idx + 1}: frames {start_frame}-{end_frame-1}")
@@ -248,6 +249,8 @@ def main():
     arg.add_argument("--proc", dest="n_proc", default=int(os.getenv("OMP_NUM_THREADS", 1)), type=int)
     arg.add_argument("--keep-chunks", dest="keep_chunks", default=False, action="store_true",
                     help="Keep temporary chunk files (for debugging)")
+    arg.add_argument("--step", dest="step_size", default=1, type=int,
+                    help="Step size for trajectory subsampling (default: 1)")
     arg = arg.parse_args()
     
     timing = {}
@@ -348,7 +351,8 @@ def main():
         # Split trajectory into chunks
         timing["splitting_trajectory"] = time.time()
         chunk_files, unitcell_lengths, unitcell_angles = split_trajectory_into_chunks(
-            arg.in_pdb_fn, arg.in_dcd_fn, arg.chunk_size, temp_dir, output_basename,arg.dcd_last
+            arg.in_pdb_fn, arg.in_dcd_fn, arg.chunk_size, temp_dir, output_basename,arg.dcd_last,
+        arg.step_size)
         )
         timing["splitting_trajectory"] = time.time() - timing["splitting_trajectory"]
         
