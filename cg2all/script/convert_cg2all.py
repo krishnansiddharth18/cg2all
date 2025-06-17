@@ -58,7 +58,7 @@ def split_trajectory_into_chunks(pdb_fn, dcd_fn, chunk_size, temp_dir, output_ba
          total_frames = int(dcd_last)
     my_traj = full_traj[:total_frames:step_size]
     total_frames_after_step = len(my_traj)
-    print(f"Total frames: {total_frames}. After skipping {step_size} frames: {total_frames_after_step")
+    print(f"Total frames: {total_frames}. After skipping {step_size} frames: {total_frames_after_step}")
     print(f"Splitting into chunks of {chunk_size} frames...")
     
     chunk_files = []
@@ -251,6 +251,8 @@ def main():
                     help="Keep temporary chunk files (for debugging)")
     arg.add_argument("--step", dest="step_size", default=1, type=int,
                     help="Step size for trajectory subsampling (default: 1)")
+    arg.add_argument("--checkpoint-interaval",dest="checkpoint_interval",default=10000,type=int,
+                     help="Save checkpoint every N frames and clear temp files (default:10000)")
     arg = arg.parse_args()
     
     timing = {}
@@ -353,14 +355,15 @@ def main():
         chunk_files, unitcell_lengths, unitcell_angles = split_trajectory_into_chunks(
             arg.in_pdb_fn, arg.in_dcd_fn, arg.chunk_size, temp_dir, output_basename,arg.dcd_last,
         arg.step_size)
-        )
+        
         timing["splitting_trajectory"] = time.time() - timing["splitting_trajectory"]
         
         # Process each chunk
         timing["forward_pass"] = time.time()
-        chunk_output_files = []
+        checkpoint_output_files = []
         reference_pdb_path = None
-        
+        processed_chunks = 0 
+        current_checkpoint_chunks = [] 
         for i, (chunk_pdb_fn, chunk_dcd_fn) in enumerate(chunk_files):
             if i == 0:
                 # Process first chunk and create reference PDB
@@ -381,16 +384,52 @@ def main():
                     save_reference_pdb=False
                 )
             
-            chunk_output_files.append(output_chunk_fn)
+            current_checkpoint_chunks.append(output_chunk_fn)
+            processed_chunks+=1
+            #Check if we need to create a checkpoint
+            frames_processed = processed_chunks *arg.chunk_size
+            if frames_processed >= arg.checkpoint_interaval or i == len(chunk_file)-1:
+                     print(f"Creating checkpoint after {frames_processed} frames...")
+                     #Create checkpoint filename
+                     checkpoint_fn = f"{output_basename}_checkpoint_{len(checkpoint_output_files):04d}.dcd"
+                     checkpoint_path = os.path.join(os.path.dirname(arg.out_fn),checkpoint_fn)
+                     
+                     #Combine current chunks into checkpoint
+                     combine_trajectory_chunks(
+                          current_checkpoint_chunks, reference_pdb_path, unitcell_lengths,
+                          unitcell_angles, checkpoint_path
+                     ) 
+
+                     checkpoint_output_files.append(checkpoint_path)
+                     print(f"Checkpoint saved: {checkpoint_path}")
+ 
+                     #Clean up input chunk files too
+                     for j in range(max(0, i - len(current_checkpoint_chunks) + 1), i + 1):
+                            input_chunk_file = os.path.join(temp_dir, f"{output_basename}_input_chunk_{j:04d}.dcd")
+                            if os.path.exists(input_chunk_file):
+                                   os.remove(input_chunk_file)
+                     print(f"Cleaned up {len(current_checkpoint_chunks)} temporary chunk files")
+
+                     #reset for next checkpoint
+                     current_checkpoint_chunks = []
+                     processed_chunks = 0
         
         timing["forward_pass"] = time.time() - timing["forward_pass"]
         
-        # Combine all chunks into final output
+        # Combine all ceckpoints into final output
         timing["writing_output"] = time.time()
+        print("Combining all checkpoints into final trajectory...")
         combine_trajectory_chunks(
-            chunk_output_files, reference_pdb_path, unitcell_lengths, 
+            checkpoint_output_files, reference_pdb_path, unitcell_lengths, 
             unitcell_angles, arg.out_fn
         )
+        
+        #clean up checkpoint files
+        if not arg.keep_chunks:
+               for checkpoint_files in checkpoint_output_files:
+                    if os.path.exists(checkpoint_file):
+                           os.remove(check_point_file)
+               print(f"Cleaned up {len(checkpoint_output_files)} checkpoint_files")
         
         # Save final frame as PDB if requested
         if arg.outpdb_fn is not None:
@@ -404,6 +443,12 @@ def main():
         if not arg.keep_chunks:
             print(f"Cleaning up temporary directory: {temp_dir}")
             shutil.rmtree(temp_dir)
+            #Also clean up any remaining checkpoint files
+            for i in range(100): 
+                  checkpoint_fn = f"{output_basename}_checkpoint_{i:04d}.dcd"
+                  checkpoint_path = os.path.join(os.path.dirname(arg.out_fn), checkpoint_fn)
+                  if os.path.exists(checkpoint_path):
+                        os.remove(checkpoint_path)
         else:
             print(f"Keeping temporary files in: {temp_dir}")
     
