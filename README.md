@@ -21,7 +21,7 @@ This package is tested on Linux (CentOS) and MacOS (Apple Silicon, M1).
 
 #### for CPU only
 ```bash
-pip install git+http://github.com/huhlim/cg2all
+pip install git+https://github.com/krishnansiddharth18/cg2all.git
 ```
 #### for CUDA (GPU) usage
 1. Install [Miniconda](https://docs.conda.io/en/latest/miniconda.html)
