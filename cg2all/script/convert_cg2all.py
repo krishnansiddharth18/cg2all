@@ -71,7 +71,7 @@ def split_trajectory_into_chunks(pdb_fn, dcd_fn, chunk_size, temp_dir, output_ba
         print(f"Processing chunk {chunk_idx + 1}: frames {start_frame}-{end_frame-1}")
         
         # Load chunk
-        chunk_traj = full_traj[start_frame:end_frame]
+        chunk_traj = my_traj[start_frame:end_frame]
         
         # Save chunk as temporary DCD file
         chunk_dcd_fn = os.path.join(temp_dir, f"{output_basename}_input_chunk_{chunk_idx:04d}.dcd")
@@ -192,14 +192,20 @@ def combine_trajectory_chunks(chunk_output_files, reference_pdb_path, unitcell_l
     print("Combining trajectory chunks...")
     
     all_xyz = []
+    all_unitcell_lengths = []
+    all_unitcell_angles = []
     
     for i, chunk_file in enumerate(tqdm.tqdm(chunk_output_files, desc="Loading chunks")):
         # Load chunk with reference PDB topology
         chunk_traj = mdtraj.load_dcd(chunk_file, top=reference_pdb_path)
         all_xyz.append(chunk_traj.xyz)
+        all_unitcell_lengths.append(chunk_traj.unitcell_lengths)
+        all_unitcell_angles.append(chunk_traj.unitcell_angles)
     
-    # Concatenate all coordinates
+    # Concatenate all coordinates and unit cell data
     final_xyz = np.concatenate(all_xyz, axis=0)
+    final_unitcell_lengths = np.concatenate(all_unitcell_lengths, axis=0)
+    final_unitcell_angles = np.concatenate(all_unitcell_angles, axis=0)
     
     print(f"Final trajectory: {len(final_xyz)} frames, {chunk_traj.n_atoms} atoms")
     
@@ -207,8 +213,8 @@ def combine_trajectory_chunks(chunk_output_files, reference_pdb_path, unitcell_l
     final_traj = mdtraj.Trajectory(
         xyz=final_xyz,
         topology=chunk_traj.topology,  # This is from the reference PDB
-        unitcell_lengths=unitcell_lengths,
-        unitcell_angles=unitcell_angles,
+        unitcell_lengths=final_unitcell_lengths,
+        unitcell_angles=final_unitcell_angles,
     )
     
     # Save final trajectory
@@ -395,9 +401,10 @@ def main():
                      checkpoint_path = os.path.join(os.path.dirname(arg.out_fn),checkpoint_fn)
                      
                      #Combine current chunks into checkpoint
+                     # Get unit cell info from current chunks - but use individual chunk data
                      combine_trajectory_chunks(
-                          current_checkpoint_chunks, reference_pdb_path, unitcell_lengths,
-                          unitcell_angles, checkpoint_path
+                          current_checkpoint_chunks, reference_pdb_path, None,
+                          None, checkpoint_path
                      ) 
 
                      checkpoint_output_files.append(checkpoint_path)
@@ -416,41 +423,50 @@ def main():
         
         timing["forward_pass"] = time.time() - timing["forward_pass"]
         
-        # Combine all ceckpoints into final output
+        # Combine all checkpoints into final output
         timing["writing_output"] = time.time()
         print("Combining all checkpoints into final trajectory...")
+        # Unit cell info will be extracted from individual checkpoints
         combine_trajectory_chunks(
-            checkpoint_output_files, reference_pdb_path, unitcell_lengths, 
-            unitcell_angles, arg.out_fn
+            checkpoint_output_files, reference_pdb_path, None, 
+            None, arg.out_fn
         )
         
-        #clean up checkpoint files
-        if not arg.keep_chunks:
-               for checkpoint_files in checkpoint_output_files:
-                    if os.path.exists(checkpoint_file):
-                           os.remove(check_point_file)
-               print(f"Cleaned up {len(checkpoint_output_files)} checkpoint_files")
+        # Verify final output was created successfully
+        if not os.path.exists(arg.out_fn):
+            raise RuntimeError(f"Failed to create final output file: {arg.out_fn}")
+        
+        print(f"Final trajectory successfully created: {arg.out_fn}")
         
         # Save final frame as PDB if requested
         if arg.outpdb_fn is not None:
             final_traj = mdtraj.load(arg.out_fn,top=reference_pdb_path)
             final_traj[0].save(arg.outpdb_fn)
+            print(f"Final PDB saved: {arg.outpdb_fn}")
         
         timing["writing_output"] = time.time() - timing["writing_output"]
         
-    finally:
-        # Clean up temporary files
+        # Only clean up checkpoint files AFTER confirming final output exists
+        if not arg.keep_chunks:
+               print("Final output verified - cleaning up checkpoint files...")
+               if os.path.exists(arg.out_fn):
+                    for checkpoint_file in checkpoint_output_files:
+                          if os.path.exists(checkpoint_file):
+                                os.remove(checkpoint_file)
+                    print(f"Cleaned up {len(checkpoint_output_files)} checkpoint files")
+        
+        # Clean up temporary directory only after successful completion
         if not arg.keep_chunks:
             print(f"Cleaning up temporary directory: {temp_dir}")
             shutil.rmtree(temp_dir)
-            #Also clean up any remaining checkpoint files
-            for i in range(100): 
-                  checkpoint_fn = f"{output_basename}_checkpoint_{i:04d}.dcd"
-                  checkpoint_path = os.path.join(os.path.dirname(arg.out_fn), checkpoint_fn)
-                  if os.path.exists(checkpoint_path):
-                        os.remove(checkpoint_path)
         else:
             print(f"Keeping temporary files in: {temp_dir}")
+            
+    finally:
+        # Only clean up temp directory if something went wrong and it still exists
+        if not arg.keep_chunks and os.path.exists(temp_dir):
+            print(f"Error occurred - cleaning up temporary directory: {temp_dir}")
+            shutil.rmtree(temp_dir)
     
     # Print timing information
     time_total = sum(timing.values())
