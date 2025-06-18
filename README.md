@@ -38,7 +38,7 @@ conda activate cg2all
 ```
 4. Install this package
 ```bash
-pip install git+http://github.com/huhlim/cg2all
+pip install git+https://github.com/krishnansiddharth18/cg2all.git
 ```
 
 #### for cryo_em_minimizer usage
@@ -53,6 +53,7 @@ convert a coarse-grained protein structure to all-atom model
 ```bash
 usage: convert_cg2all [-h] -p IN_PDB_FN [-d IN_DCD_FN] -o OUT_FN [-opdb OUTPDB_FN]
                       [--cg {supported_cg_models}] [--chain-break-cutoff CHAIN_BREAK_CUTOFF] [-a]
+                      [--last LAST_FRAME] [--step STEP_SIZE]
                       [--fix] [--ckpt CKPT_FN] [--time TIME_JSON] [--device DEVICE] [--batch BATCH_SIZE] [--proc N_PROC]
 
 options:
@@ -64,6 +65,8 @@ options:
   --cg {supported_cg_models}
   --chain-break-cutoff CHAIN_BREAK_CUTOFF
   -a, --all, --is_all
+  --last LAST_FRAME
+  --step STEP_SIZE
   --fix, --fix_atom
   --standard-name
   --ckpt CKPT_FN
@@ -89,6 +92,8 @@ options:
   - Martini3: [Martini3](http://www.cgmartini.nl/index.php/martini-3-0) model
   - PRIMO: [PRIMO](http://dx.doi.org/10.1002/prot.22645) model
 * --chain-break-cutoff: The CA-CA distance cutoff that determines chain breaks. (default=10 Angstroms)
+* --step: Step size at which dcd trajectory is processed. (default=1)
+* --last: Last frame of dcd trajectory to be processed. (default=processes entire trajectory)
 * --fix/--fix_atom: preserve coordinates in the input CG model. For example, CA coordinates in a CA-trace model will be kept in its cg2all output model.
 * --standard-name: output atom names follow the IUPAC nomenclature. (default=False; output atom names will use CHARMM atom names)
 * --ckpt: Input PyTorch ckpt file (optional). If a ckpt file is given, it will override "--cg" option.
