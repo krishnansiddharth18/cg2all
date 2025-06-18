@@ -388,7 +388,7 @@ def main():
             processed_chunks+=1
             #Check if we need to create a checkpoint
             frames_processed = processed_chunks *arg.chunk_size
-            if frames_processed >= arg.checkpoint_interval or i == len(chunk_file)-1:
+            if frames_processed >= arg.checkpoint_interval or i == len(chunk_files)-1:
                      print(f"Creating checkpoint after {frames_processed} frames...")
                      #Create checkpoint filename
                      checkpoint_fn = f"{output_basename}_checkpoint_{len(checkpoint_output_files):04d}.dcd"
