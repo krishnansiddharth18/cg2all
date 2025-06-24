@@ -202,10 +202,15 @@ def combine_trajectory_chunks(chunk_output_files, reference_pdb_path, unitcell_l
         all_unitcell_lengths.append(chunk_traj.unitcell_lengths)
         all_unitcell_angles.append(chunk_traj.unitcell_angles)
     
-    # Concatenate all coordinates and unit cell data
-    final_xyz = np.concatenate(all_xyz, axis=0)
-    final_unitcell_lengths = np.concatenate(all_unitcell_lengths, axis=0)
-    final_unitcell_angles = np.concatenate(all_unitcell_angles, axis=0)
+    # Robust concatenation that works for single or multiple chunks
+    if len(all_xyz) == 1:
+        final_xyz = all_xyz[0]
+        final_unitcell_lengths = all_unitcell_lengths[0]
+        final_unitcell_angles = all_unitcell_angles[0]
+    else:
+        final_xyz = np.concatenate(all_xyz, axis=0)
+        final_unitcell_lengths = np.concatenate(all_unitcell_lengths, axis=0)
+        final_unitcell_angles = np.concatenate(all_unitcell_angles, axis=0)
     
     print(f"Final trajectory: {len(final_xyz)} frames, {chunk_traj.n_atoms} atoms")
     
@@ -225,7 +230,7 @@ def combine_trajectory_chunks(chunk_output_files, reference_pdb_path, unitcell_l
 def main():
     arg = argparse.ArgumentParser(prog="convert_cg2all_chunked")
     arg.add_argument("-p", "--pdb", dest="in_pdb_fn", required=True)
-    arg.add_argument("-d", "--dcd", dest="in_dcd_fn", required=True)  # Required for chunked processing
+    arg.add_argument("-d", "--dcd", dest="in_dcd_fn", default=None)  # Changed from required=True to default=None
     arg.add_argument("-o", "--out", "--output", dest="out_fn", required=True)
     arg.add_argument("-opdb", dest="outpdb_fn")
     arg.add_argument("--chunk-size", dest="chunk_size", default=1000, type=int, 
@@ -348,6 +353,65 @@ def main():
     model.eval()
     timing["model_configuration"] = time.time() - timing["model_configuration"]
     
+    # ADD SINGLE PDB PROCESSING HERE (like original cg2all)
+    if arg.in_dcd_fn is None:
+        # Single PDB processing (copied from original cg2all)
+        timing["loading_input"] = time.time()
+        input_s = PredictionData(
+            arg.in_pdb_fn,
+            cg_model,
+            topology_map=topology_map,
+            dcd_fn=arg.in_dcd_fn,
+            radius=config.globals.radius,
+            chain_break_cutoff=0.1 * arg.chain_break_cutoff,
+            is_all=arg.is_all,
+            fix_atom=config.globals.fix_atom,
+            batch_size=arg.batch_size,
+        )
+        
+        if len(input_s) > 1 and (arg.n_proc > 1 or arg.batch_size > 1):
+            input_s = dgl.dataloading.GraphDataLoader(
+                input_s, batch_size=arg.batch_size, num_workers=arg.n_proc, shuffle=False
+            )
+        else:
+            input_s = dgl.dataloading.GraphDataLoader(
+                input_s, batch_size=1, num_workers=1, shuffle=False
+            )
+        
+        t0 = time.time()
+        batch = next(iter(input_s)).to(device)
+        timing["loading_input"] = time.time() - t0
+        
+        t0 = time.time()
+        with torch.no_grad():
+            R = model.forward(batch)[0]["R"]
+        timing["forward_pass"] = time.time() - t0
+        
+        timing["writing_output"] = time.time()
+        traj_s, ssbond_s = create_trajectory_from_batch(batch, R)
+        output = patch_termini(traj_s[0])
+        if arg.standard_names:
+            standardize_atom_name(output)
+        output.save(arg.out_fn)
+        if len(ssbond_s[0]) > 0:
+            write_SSBOND(arg.out_fn, output.top, ssbond_s[0])
+        timing["writing_output"] = time.time() - timing["writing_output"]
+        
+        # Print timing information
+        time_total = sum(timing.values())
+        timing["total"] = time_total
+        
+        print("\nTiming Summary:")
+        for step, t in timing.items():
+            print(f"  {step}: {t:.2f} seconds")
+        
+        if arg.time_json is not None:
+            with open(arg.time_json, "wt") as fout:
+                fout.write(json.dumps(timing, indent=2))
+        
+        return  # Exit early for single PDB case
+    
+    # TRAJECTORY PROCESSING (chunked) - rest of original code
     # Create temporary directory for chunks
     temp_dir = tempfile.mkdtemp(prefix="cg2all_chunks_")
     print(f"Using temporary directory: {temp_dir}")
