@@ -199,8 +199,7 @@ def process_single_chunk(chunk_pdb_fn, chunk_dcd_fn, model, cg_model, config,
         return output_chunk_fn
 
 
-def combine_trajectory_chunks(chunk_output_files, reference_pdb_path, unitcell_lengths, 
-                            unitcell_angles, final_output_fn):
+def combine_trajectory_chunks(chunk_output_files, reference_pdb_path, final_output_fn):
     """
     Combine all processed trajectory chunks into final output file.
     Uses the reference PDB for consistent topology.
@@ -210,7 +209,7 @@ def combine_trajectory_chunks(chunk_output_files, reference_pdb_path, unitcell_l
     n_atoms     = None 
    
     #Use DCD writer for streaming
-    with mdtraj.formats.DCDTrajectoryFile(final_output_fn,w) as writer:
+    with mdtraj.formats.DCDTrajectoryFile(final_output_fn,'w') as writer:
         for i,chunk_file in enumerate(tqdm.tqdm(chunk_output_files, desc="Loading chunks")):
             chunk_traj = mdtraj.load_dcd(chunk_file, top=reference_pdb_path)
 
@@ -218,8 +217,8 @@ def combine_trajectory_chunks(chunk_output_files, reference_pdb_path, unitcell_l
                n_atoms = chunk_traj.n_atoms
 
             writer.write(chunk_traj.xyz,
-                         unitcell_lengths=chunk_traj.unitcell_lengths,
-                         unitcell_angles = chunk_traj.unitcell_angles)
+                         cell_lengths=chunk_traj.unitcell_lengths,
+                         cell_angles = chunk_traj.unitcell_angles)
             total_frames += len(chunk_traj)
      
 
@@ -468,9 +467,7 @@ def main():
                      
                      #Combine current chunks into checkpoint
                      # Get unit cell info from current chunks - but use individual chunk data
-                     combine_trajectory_chunks(
-                          current_checkpoint_chunks, reference_pdb_path, checkpoint_path
-                     ) 
+                     combine_trajectory_chunks(current_checkpoint_chunks, reference_pdb_path, checkpoint_path) 
 
                      checkpoint_output_files.append(checkpoint_path)
                      print(f"Checkpoint saved: {checkpoint_path}")
@@ -485,7 +482,7 @@ def main():
                      #reset for next checkpoint
                      current_checkpoint_chunks = []
                      processed_chunks = 0
-        
+       
         timing["forward_pass"] = time.time() - timing["forward_pass"]
         
         # Combine all checkpoints into final output
