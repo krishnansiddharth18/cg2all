@@ -9,7 +9,7 @@ import pathlib
 import argparse
 import tempfile
 import shutil
-
+import gc
 import numpy as np
 import torch
 import dgl
@@ -51,35 +51,43 @@ def split_trajectory_into_chunks(pdb_fn, dcd_fn, chunk_size, temp_dir, output_ba
     print(f"Loading trajectory to determine total frames...")
     
     # Load full trajectory to get frame count and metadata
-    full_traj = mdtraj.load(dcd_fn, top=pdb_fn)
-    if int(dcd_last) ==-1:
-         total_frames = len(full_traj)
+    with mdtraj.open(dcd_fn) as f:
+            total_frames_original = len(f)
+    if int(dcd_last) == -1:
+           total_frames = total_frames_original
     else:
-         total_frames = int(dcd_last)
-    my_traj = full_traj[:total_frames:step_size]
-    total_frames_after_step = len(my_traj)
+           total_frames = int(dcd_last)
+
+    total_frames_after_step = (total_frames + step_size -1)//step_size
+
     print(f"Total frames: {total_frames}. After skipping {step_size} frames: {total_frames_after_step}")
     print(f"Splitting into chunks of {chunk_size} frames...")
     
     chunk_files = []
+    chunk_idx   = 0 
     
-    
-    for start_frame in range(0, total_frames_after_step, chunk_size):
-        end_frame = min(start_frame + chunk_size, total_frames_after_step)
-        chunk_idx = start_frame // chunk_size
-        
-        print(f"Processing chunk {chunk_idx + 1}: frames {start_frame}-{end_frame-1}")
-        
-        # Load chunk
-        chunk_traj = my_traj[start_frame:end_frame]
-        
-        # Save chunk as temporary DCD file
+    for chunk_traj in mdtraj.iterload(dcd_fn, top=pdb_fn, chunk=chunk_size):
+        if chunk_idx * chunk_size >= total_frames:
+                  break
+
+        if step_size > 1:
+              chunk_traj = chunk_traj[::step_size]
+        if len(chunk_traj) ==0:
+              chunk_idx += 1
+              continue
+
+        print(f"Processing chunk {chunk_idx + 1} : {len(chunk_traj)} frames")
+
+        #Save chunk as temporary dcd file
         chunk_dcd_fn = os.path.join(temp_dir, f"{output_basename}_input_chunk_{chunk_idx:04d}.dcd")
         chunk_traj.save_dcd(chunk_dcd_fn)
-        
+
+
         chunk_files.append((pdb_fn, chunk_dcd_fn))
-    
-    return chunk_files, my_traj.unitcell_lengths, my_traj.unitcell_angles
+        del chunk_traj
+        chunk_idx +=1
+
+    return chunk_files
 
 
 def create_reference_topology_pdb(first_chunk_file, temp_dir, output_basename):
@@ -105,7 +113,15 @@ def process_single_chunk(chunk_pdb_fn, chunk_dcd_fn, model, cg_model, config,
         Path to the output trajectory chunk file, and optionally reference PDB path
     """
     print(f"Processing chunk {chunk_idx}...")
+    try:
+       del xyz_list, xyz_chunk, chunk_traj, output_chunk
+    except NameError:
+       pass 
     
+    gc.collect()
+    if torch.cuda.is_available():
+          torch.cuda.empty_cache()
+
     # Create PredictionData for this chunk
     input_chunk = PredictionData(
         chunk_pdb_fn,
@@ -190,42 +206,28 @@ def combine_trajectory_chunks(chunk_output_files, reference_pdb_path, unitcell_l
     Uses the reference PDB for consistent topology.
     """
     print("Combining trajectory chunks...")
-    
-    all_xyz = []
-    all_unitcell_lengths = []
-    all_unitcell_angles = []
-    
-    for i, chunk_file in enumerate(tqdm.tqdm(chunk_output_files, desc="Loading chunks")):
-        # Load chunk with reference PDB topology
-        chunk_traj = mdtraj.load_dcd(chunk_file, top=reference_pdb_path)
-        all_xyz.append(chunk_traj.xyz)
-        all_unitcell_lengths.append(chunk_traj.unitcell_lengths)
-        all_unitcell_angles.append(chunk_traj.unitcell_angles)
-    
-    # Robust concatenation that works for single or multiple chunks
-    if len(all_xyz) == 1:
-        final_xyz = all_xyz[0]
-        final_unitcell_lengths = all_unitcell_lengths[0]
-        final_unitcell_angles = all_unitcell_angles[0]
-    else:
-        final_xyz = np.concatenate(all_xyz, axis=0)
-        final_unitcell_lengths = np.concatenate(all_unitcell_lengths, axis=0)
-        final_unitcell_angles = np.concatenate(all_unitcell_angles, axis=0)
-    
-    print(f"Final trajectory: {len(final_xyz)} frames, {chunk_traj.n_atoms} atoms")
-    
-    # Create final trajectory using reference topology
-    final_traj = mdtraj.Trajectory(
-        xyz=final_xyz,
-        topology=chunk_traj.topology,  # This is from the reference PDB
-        unitcell_lengths=final_unitcell_lengths,
-        unitcell_angles=final_unitcell_angles,
-    )
-    
-    # Save final trajectory
-    final_traj.save(final_output_fn)
-    print(f"Final trajectory saved: {final_output_fn}")
+    total_frames = 0
+    n_atoms     = None 
+   
+    #Use DCD writer for streaming
+    with mdtraj.formats.DCDTrajectoryFile(final_output_fn,w) as writer:
+        for i,chunk_file in enumerate(tqdm.tqdm(chunk_output_files, desc="Loading chunks")):
+            chunk_traj = mdtraj.load_dcd(chunk_file, top=reference_pdb_path)
 
+            if i == 0:
+               n_atoms = chunk_traj.n_atoms
+
+            writer.write(chunk_traj.xyz,
+                         unitcell_lengths=chunk_traj.unitcell_lengths,
+                         unitcell_angles = chunk_traj.unitcell_angles)
+            total_frames += len(chunk_traj)
+     
+
+            del chunk_traj
+
+
+    print(f"Final trajectory: {total_frames} frames, {n_atoms} atoms")
+    print(f"Final trajectory saved: {final_output_fn}")
 
 def main():
     arg = argparse.ArgumentParser(prog="convert_cg2all_chunked")
@@ -422,7 +424,7 @@ def main():
     try:
         # Split trajectory into chunks
         timing["splitting_trajectory"] = time.time()
-        chunk_files, unitcell_lengths, unitcell_angles = split_trajectory_into_chunks(
+        chunk_files = split_trajectory_into_chunks(
             arg.in_pdb_fn, arg.in_dcd_fn, arg.chunk_size, temp_dir, output_basename,arg.dcd_last,
         arg.step_size)
         
@@ -467,8 +469,7 @@ def main():
                      #Combine current chunks into checkpoint
                      # Get unit cell info from current chunks - but use individual chunk data
                      combine_trajectory_chunks(
-                          current_checkpoint_chunks, reference_pdb_path, None,
-                          None, checkpoint_path
+                          current_checkpoint_chunks, reference_pdb_path, checkpoint_path
                      ) 
 
                      checkpoint_output_files.append(checkpoint_path)
@@ -492,8 +493,7 @@ def main():
         print("Combining all checkpoints into final trajectory...")
         # Unit cell info will be extracted from individual checkpoints
         combine_trajectory_chunks(
-            checkpoint_output_files, reference_pdb_path, None, 
-            None, arg.out_fn
+            checkpoint_output_files, reference_pdb_path, arg.out_fn
         )
         
         # Verify final output was created successfully
