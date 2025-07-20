@@ -116,18 +116,6 @@ def process_single_chunk(chunk_pdb_fn, chunk_dcd_fn, model, cg_model, config,
     
 
     ##debugging helper function
-    import subprocess
-    import time
-    import psutil
-    def log_memory(stage):
-        timestamp = time.strftime("%H:%M:%S")
-        mem = psutil.virtual_memory()
-        process = psutil.Process()
-        rss_gb = process.memory_info().rss/1024**3
-    
-        print(f"[{timestamp} {stage:20s} |"
-              f"System: {mem.used/1024**3:5.1f}GB used, {mem.cached/1024**3:5.1f}GB cached |"
-              f"Process: {rss_gb:5.1f}GB RSS")
     log_memory(f"chunk_{chunk_idx}_start")
     
     if torch.cuda.is_available():
@@ -145,7 +133,7 @@ def process_single_chunk(chunk_pdb_fn, chunk_dcd_fn, model, cg_model, config,
         fix_atom=config.globals.fix_atom,
         batch_size=batch_size,
     )
-    log_memory(f"chunk_{chunk_idx}_loaded")
+    
     # Setup data loader
     if len(input_chunk) > 1 and (n_proc > 1 or batch_size > 1):
         input_loader = dgl.dataloading.GraphDataLoader(
@@ -171,7 +159,7 @@ def process_single_chunk(chunk_pdb_fn, chunk_dcd_fn, model, cg_model, config,
             del R, mask, coords
         gc.collect() 
         
-    log_memory(f"chunk_{chunk_idx}_processed")
+    
  
     # Combine xyz coordinates for this chunk
     if batch_size > 1:
@@ -224,23 +212,32 @@ def process_single_chunk(chunk_pdb_fn, chunk_dcd_fn, model, cg_model, config,
         output_chunk[0].save_pdb(reference_pdb_path)
         print(f"Reference topology PDB created: {reference_pdb_path}")
         print(f"Reference topology has {output_chunk.n_atoms} atoms")
-   
+    
 
      
     # Save chunk output
     output_chunk_fn = os.path.join(temp_dir, f"{output_basename}_output_chunk_{chunk_idx:04d}.dcd")
-    output_chunk.save_dcd(output_chunk_fn)
+    
+    xyz_data = output_chunk.xyz
+    
+    cell_lengths = output_chunk.unitcell_lengths
+    cell_angles = output_chunk.unitcell_angles
+    
+    with mdtraj.formats.DCDTrajectoryFile(output_chunk_fn,'w') as dcd_writer:
+         dcd_writer.write(xyz_data,cell_lengths=cell_lengths,cell_angles=cell_angles)
+
+
     log_memory(f"chunk_{chunk_idx}_saved")
 
-    del input_chunk, output_chunk    
+    del input_chunk, output_chunk, xyz_data,cell_lengths,cell_angles    
     gc.collect()
+#    drop_file_cache(output_chunk_fn)
     
-    log_memory(f"chunk_{chunk_idx}_cleanup")
     import sys
     if hasattr(sys, '_clear_type_cace'):
          sys._clear_type_cache()
 
-    clear_mdtraj_caches()
+    
     gc.collect()
     if save_reference_pdb:
         return output_chunk_fn, reference_pdb_path
@@ -260,19 +257,24 @@ def combine_trajectory_chunks(chunk_output_files, reference_pdb_path, final_outp
     #Use DCD writer for streaming
     with mdtraj.formats.DCDTrajectoryFile(final_output_fn,'w') as writer:
         for i,chunk_file in enumerate(tqdm.tqdm(chunk_output_files, desc="Loading chunks")):
+            log_memory(f"Before loading chunk {i} to checkpoint") 
             chunk_traj = mdtraj.load_dcd(chunk_file, top=reference_pdb_path)
 
             if i == 0:
                n_atoms = chunk_traj.n_atoms
-
+            log_memory(f"After loading, Before writing chunk {i} to checkpoint") 
             writer.write(chunk_traj.xyz,
                          cell_lengths=chunk_traj.unitcell_lengths,
                          cell_angles = chunk_traj.unitcell_angles)
             total_frames += len(chunk_traj)
      
-
+            log_memory(f"After writing chunk {i} to checkpoint")
             del chunk_traj
-
+            
+            drop_file_cache(chunk_file)
+            log_memory(f"After cleaning chunk {i} cache")
+            drop_file_cache(final_output_fn)
+            log_memory(f"After output cache for {i} chunk iter")
 
     print(f"Final trajectory: {total_frames} frames, {n_atoms} atoms")
     print(f"Final trajectory saved: {final_output_fn}")
@@ -471,6 +473,7 @@ def main():
     
     try:
         # Split trajectory into chunks
+        log_memory("Initial memory") 
         timing["splitting_trajectory"] = time.time()
         chunk_files = split_trajectory_into_chunks(
             arg.in_pdb_fn, arg.in_dcd_fn, arg.chunk_size, temp_dir, output_basename,arg.dcd_last,
@@ -538,10 +541,11 @@ def main():
         timing["writing_output"] = time.time()
         print("Combining all checkpoints into final trajectory...")
         # Unit cell info will be extracted from individual checkpoints
+        log_memory("Before combining checkpoints")
         combine_trajectory_chunks(
             checkpoint_output_files, reference_pdb_path, arg.out_fn
         )
-        
+        log_memory("After combining checkpoints")
         # Verify final output was created successfully
         if not os.path.exists(arg.out_fn):
             raise RuntimeError(f"Failed to create final output file: {arg.out_fn}")
@@ -607,6 +611,40 @@ def clear_mdtraj_caches():
             registry._cache.clear()
     except:
        pass
+#memory logger
+import subprocess
+import time
+import psutil
+def log_memory(stage):
+        timestamp = time.strftime("%H:%M:%S")
+        mem = psutil.virtual_memory()
+        process = psutil.Process()
+        rss_gb = process.memory_info().rss/1024**3
+    
+        print(f"[{timestamp} {stage:20s} |"
+              f"System: {mem.used/1024**3:5.1f}GB used, {mem.cached/1024**3:5.1f}GB cached |"
+              f"Process: {rss_gb:5.1f}GB RSS")
+
+#os cache clearing
+def drop_file_cache(filename):
+   try:
+        fd = os.open(filename, os.O_RDONLY)
+        os.fsync(fd)
+        os.close(fd)
+
+        # Linux: use posix_fadvise to tell OS we don't need this file cached
+        import ctypes
+        import ctypes.util
+
+        libc = ctypes.CDLL(ctypes.util.find_library('c'))
+        POSIX_FADV_DONTNEED = 4
+
+        fd = os.open(filename,os.O_RDONLY)
+        libc.posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)
+        os.close(fd)
+        
+   except Exception as e:
+        print(f"Warning: Could not drop cache for {filename}: {e}")
 
 if __name__ == "__main__":
     main()
