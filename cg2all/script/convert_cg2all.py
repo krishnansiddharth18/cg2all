@@ -113,12 +113,23 @@ def process_single_chunk(chunk_pdb_fn, chunk_dcd_fn, model, cg_model, config,
         Path to the output trajectory chunk file, and optionally reference PDB path
     """
     print(f"Processing chunk {chunk_idx}...")
-    try:
-       del xyz_list, xyz_chunk, chunk_traj, output_chunk
-    except NameError:
-       pass 
     
-    gc.collect()
+
+    ##debugging helper function
+    import subprocess
+    import time
+    import psutil
+    def log_memory(stage):
+        timestamp = time.strftime("%H:%M:%S")
+        mem = psutil.virtual_memory()
+        process = psutil.Process()
+        rss_gb = process.memory_info().rss/1024**3
+    
+        print(f"[{timestamp} {stage:20s} |"
+              f"System: {mem.used/1024**3:5.1f}GB used, {mem.cached/1024**3:5.1f}GB cached |"
+              f"Process: {rss_gb:5.1f}GB RSS")
+    log_memory(f"chunk_{chunk_idx}_start")
+    
     if torch.cuda.is_available():
           torch.cuda.empty_cache()
 
@@ -134,7 +145,7 @@ def process_single_chunk(chunk_pdb_fn, chunk_dcd_fn, model, cg_model, config,
         fix_atom=config.globals.fix_atom,
         batch_size=batch_size,
     )
-    
+    log_memory(f"chunk_{chunk_idx}_loaded")
     # Setup data loader
     if len(input_chunk) > 1 and (n_proc > 1 or batch_size > 1):
         input_loader = dgl.dataloading.GraphDataLoader(
@@ -153,20 +164,39 @@ def process_single_chunk(chunk_pdb_fn, chunk_dcd_fn, model, cg_model, config,
         with torch.no_grad():
             R = model.forward(batch)[0]["R"].cpu().detach().numpy()
             mask = batch.ndata["output_atom_mask"].cpu().detach().numpy()
-            xyz_list.append(R[mask > 0.0])
-    
+
+            coords = R[mask>0.0]
+            xyz_list.append(coords)
+      
+            del R, mask, coords
+        gc.collect() 
+        
+    log_memory(f"chunk_{chunk_idx}_processed")
+ 
     # Combine xyz coordinates for this chunk
     if batch_size > 1:
         batch = dgl.unbatch(batch)[0]
-        xyz_chunk = np.concatenate(xyz_list, axis=0)
+        xyz_combined = np.concatenate(xyz_list, axis=0)
+        del xyz_list
+        gc.collect()
+
         n_frames_chunk = input_chunk.n_frame0 # Get actual number of frames in chunk
-        xyz_chunk = xyz_chunk.reshape((n_frames_chunk, -1, 3))
+        xyz_chunk = xyz_combined.reshape((n_frames_chunk, -1, 3))
+        del xyz_combined
+        gc.collect()
     else:
         xyz_chunk = np.array(xyz_list)
+        del xyz_list
+        gc.collect()
     
     # Create topology and reorder atoms
     top, atom_index = create_topology_from_data(batch)
-    xyz_chunk = xyz_chunk[:, atom_index]
+
+    xyz_reordered = xyz_chunk[:, atom_index]
+    del xyz_chunk
+    xyz_chunk = xyz_reordered
+    del xyz_reordered
+    gc.collect() 
     
     # Create trajectory for this chunk
     chunk_traj = mdtraj.Trajectory(
@@ -175,9 +205,15 @@ def process_single_chunk(chunk_pdb_fn, chunk_dcd_fn, model, cg_model, config,
         unitcell_lengths=input_chunk.cg.unitcell_lengths,
         unitcell_angles=input_chunk.cg.unitcell_angles,
     )
-    
+    log_memory(f"chunk_{chunk_idx}_processed")
+    del  batch, top, atom_index, xyz_chunk
+    gc.collect()
     # Apply post-processing
     output_chunk = patch_termini(chunk_traj)
+  
+    del chunk_traj
+    gc.collect() 
+    
     if standard_names:
         standardize_atom_name(output_chunk)
     
@@ -188,11 +224,24 @@ def process_single_chunk(chunk_pdb_fn, chunk_dcd_fn, model, cg_model, config,
         output_chunk[0].save_pdb(reference_pdb_path)
         print(f"Reference topology PDB created: {reference_pdb_path}")
         print(f"Reference topology has {output_chunk.n_atoms} atoms")
-    
+   
+
+     
     # Save chunk output
     output_chunk_fn = os.path.join(temp_dir, f"{output_basename}_output_chunk_{chunk_idx:04d}.dcd")
     output_chunk.save_dcd(output_chunk_fn)
+    log_memory(f"chunk_{chunk_idx}_saved")
+
+    del input_chunk, output_chunk    
+    gc.collect()
     
+    log_memory(f"chunk_{chunk_idx}_cleanup")
+    import sys
+    if hasattr(sys, '_clear_type_cace'):
+         sys._clear_type_cache()
+
+    clear_mdtraj_caches()
+    gc.collect()
     if save_reference_pdb:
         return output_chunk_fn, reference_pdb_path
     else:
@@ -541,6 +590,23 @@ def main():
         with open(arg.time_json, "wt") as fout:
             fout.write(json.dumps(timing, indent=2))
 
+
+#memor saving functions
+def clear_mdtraj_caches():
+    try:
+       import mdtraj.core.element as element
+       if hasattr(element,'_cache'):
+          element._cache.clear()
+    except:
+          pass
+
+
+    try: 
+       import mdtraj.formats.registry as registry
+       if hasattr(registry,'_cache'):
+            registry._cache.clear()
+    except:
+       pass
 
 if __name__ == "__main__":
     main()
