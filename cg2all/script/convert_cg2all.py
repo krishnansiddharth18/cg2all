@@ -90,17 +90,12 @@ def split_trajectory_into_chunks(pdb_fn, dcd_fn, chunk_size, temp_dir, output_ba
     return chunk_files
 
 
-def create_reference_topology_pdb(first_chunk_file, temp_dir, output_basename):
-    """
-    This function is no longer needed since we create the reference PDB 
-    during chunk processing before saving the DCD.
-    """
-    pass
+
 
 
 def process_single_chunk(chunk_pdb_fn, chunk_dcd_fn, model, cg_model, config, 
                         topology_map, device, batch_size, n_proc, chain_break_cutoff, 
-                        is_all, fix_atom, standard_names, temp_dir, chunk_idx, output_basename,
+                        is_all, fix_atom, standard_names, temp_dir, chunk_idx, output_basename,output_path,
                         save_reference_pdb=False):
     """
     Process a single trajectory chunk and save the output.
@@ -205,47 +200,73 @@ def process_single_chunk(chunk_pdb_fn, chunk_dcd_fn, model, cg_model, config,
     if standard_names:
         standardize_atom_name(output_chunk)
     
+    reference_pdb_path = None   
     # Save reference PDB from first chunk if requested
-    reference_pdb_path = None
     if save_reference_pdb:
-        reference_pdb_path = os.path.join(temp_dir, f"{output_basename}_reference_topology.pdb")
+        reference_pdb_path = os.path.join(output_path,f'{output_basename}.pdb')
         output_chunk[0].save_pdb(reference_pdb_path)
         print(f"Reference topology PDB created: {reference_pdb_path}")
-        print(f"Reference topology has {output_chunk.n_atoms} atoms")
-    
-
-     
+        print(f"Reference topology has {output_chunk.n_atoms} atoms")    
     # Save chunk output
-    output_chunk_fn = os.path.join(temp_dir, f"{output_basename}_output_chunk_{chunk_idx:04d}.dcd")
+    #output_chunk_fn = os.path.join(temp_dir, f"{output_basename}_output_chunk_{chunk_idx:04d}.dcd")
     
-    xyz_data = output_chunk.xyz
+#    xyz_data = output_chunk.xyz
     
-    cell_lengths = output_chunk.unitcell_lengths
-    cell_angles = output_chunk.unitcell_angles
+#    cell_lengths = output_chunk.unitcell_lengths
+#    cell_angles = output_chunk.unitcell_angles
     
-    with mdtraj.formats.DCDTrajectoryFile(output_chunk_fn,'w') as dcd_writer:
-         dcd_writer.write(xyz_data,cell_lengths=cell_lengths,cell_angles=cell_angles)
+    #with mdtraj.formats.DCDTrajectoryFile(output_chunk_fn,'w') as dcd_writer:
+    #     dcd_writer.write(xyz_data,cell_lengths=cell_lengths,cell_angles=cell_angles)
 
 
     log_memory(f"chunk_{chunk_idx}_saved")
 
-    del input_chunk, output_chunk, xyz_data,cell_lengths,cell_angles    
+    del input_chunk    
     gc.collect()
-#    drop_file_cache(output_chunk_fn)
+#    drop_file_cache(output_chunk_fn)    
     
-    import sys
-    if hasattr(sys, '_clear_type_cace'):
-         sys._clear_type_cache()
-
-    
-    gc.collect()
+   
     if save_reference_pdb:
-        return output_chunk_fn, reference_pdb_path
+        return output_chunk, reference_pdb_path
     else:
-        return output_chunk_fn
+        return output_chunk
 
 
-def combine_trajectory_chunks(chunk_output_files, reference_pdb_path, final_output_fn):
+def combine_trajectory_chunks(chunk_output, final_output_fn, save_reference_pdb=False):
+    """
+    Combine all processed trajectory chunks into final output file.
+    Uses the reference PDB for consistent topology.
+    """
+    print("Combining trajectory chunks...")
+    total_frames = 0
+    n_atoms     = None 
+    log_memory(f"Before opening_outputfile") 
+    
+
+    #Use DCD writer for streaming
+    with mdtraj.formats.DCDTrajectoryFile(final_output_fn,'w') as writer:
+        for i,chunk_traj in enumerate(chunk_output):
+            log_memory(f"Before loading chunk {i} to checkpoint")   
+            if i == 0:
+               n_atoms = chunk_traj.n_atoms
+            log_memory(f"After loading, Before writing chunk {i} to checkpoint") 
+            writer.write(chunk_traj.xyz,
+                         cell_lengths=chunk_traj.unitcell_lengths,
+                         cell_angles = chunk_traj.unitcell_angles)
+            gc.collect()
+            total_frames += len(chunk_traj)
+     
+            log_memory(f"After writing chunk {i} to checkpoint")
+            del chunk_traj
+            
+            
+            drop_file_cache(final_output_fn)
+            log_memory(f"After output cache for {i} chunk iter")
+
+    print(f"Final trajectory: {total_frames} frames, {n_atoms} atoms")
+    print(f"Final trajectory saved: {final_output_fn}")
+
+def combine_checkpoint(checkpoint_files,reference_pdb_path, final_output_fn):
     """
     Combine all processed trajectory chunks into final output file.
     Uses the reference PDB for consistent topology.
@@ -256,7 +277,7 @@ def combine_trajectory_chunks(chunk_output_files, reference_pdb_path, final_outp
    
     #Use DCD writer for streaming
     with mdtraj.formats.DCDTrajectoryFile(final_output_fn,'w') as writer:
-        for i,chunk_file in enumerate(tqdm.tqdm(chunk_output_files, desc="Loading chunks")):
+        for i,chunk_file in enumerate(tqdm.tqdm(checkpoint_files, desc="Loading chunks")):
             log_memory(f"Before loading chunk {i} to checkpoint") 
             chunk_traj = mdtraj.load_dcd(chunk_file, top=reference_pdb_path)
 
@@ -445,6 +466,8 @@ def main():
         if arg.standard_names:
             standardize_atom_name(output)
         output.save(arg.out_fn)
+        if arg.outpdb_fn is not None:
+            output.save(arg.outpdb_fn)
         if len(ssbond_s[0]) > 0:
             write_SSBOND(arg.out_fn, output.top, ssbond_s[0])
         timing["writing_output"] = time.time() - timing["writing_output"]
@@ -487,53 +510,55 @@ def main():
         reference_pdb_path = None
         processed_chunks = 0 
         current_checkpoint_chunks = [] 
+                       # Process remaining chunks normally
         for i, (chunk_pdb_fn, chunk_dcd_fn) in enumerate(chunk_files):
             if i == 0:
                 # Process first chunk and create reference PDB
-                output_chunk_fn, reference_pdb_path = process_single_chunk(
+                output_chunk, reference_pdb_path = process_single_chunk(
                     chunk_pdb_fn, chunk_dcd_fn, model, cg_model, config, 
                     topology_map, device, arg.batch_size, arg.n_proc, 
                     arg.chain_break_cutoff, arg.is_all, arg.fix_atom, 
-                    arg.standard_names, temp_dir, i, output_basename,
+                    arg.standard_names, temp_dir, i, output_basename,output_path=os.path.dirname(arg.out_fn),
                     save_reference_pdb=True
                 )
             else:
                 # Process remaining chunks normally
-                output_chunk_fn = process_single_chunk(
+                output_chunk = process_single_chunk(
                     chunk_pdb_fn, chunk_dcd_fn, model, cg_model, config, 
                     topology_map, device, arg.batch_size, arg.n_proc, 
                     arg.chain_break_cutoff, arg.is_all, arg.fix_atom, 
-                    arg.standard_names, temp_dir, i, output_basename,
+                    arg.standard_names, temp_dir, i, output_basename,output_path=os.path.dirname(arg.out_fn),
                     save_reference_pdb=False
                 )
-            
-            current_checkpoint_chunks.append(output_chunk_fn)
+                     
+            current_checkpoint_chunks.append(output_chunk)
             processed_chunks+=1
-            #Check if we need to create a checkpoint
+                #Check if we need to create a checkpoint
             frames_processed = processed_chunks *arg.chunk_size
             if frames_processed >= arg.checkpoint_interval or i == len(chunk_files)-1:
-                     print(f"Creating checkpoint after {frames_processed} frames...")
-                     #Create checkpoint filename
-                     checkpoint_fn = f"{output_basename}_checkpoint_{len(checkpoint_output_files):04d}.dcd"
-                     checkpoint_path = os.path.join(os.path.dirname(arg.out_fn),checkpoint_fn)
-                     
-                     #Combine current chunks into checkpoint
-                     # Get unit cell info from current chunks - but use individual chunk data
-                     combine_trajectory_chunks(current_checkpoint_chunks, reference_pdb_path, checkpoint_path) 
+                         print(f"Creating checkpoint after {frames_processed} frames...")
+                         #Create checkpoint filename
+                         checkpoint_fn = f"{output_basename}_checkpoint_{len(checkpoint_output_files):04d}.dcd"
+                         checkpoint_path = os.path.join(os.path.dirname(arg.out_fn),checkpoint_fn)
+                         
+                         #Combine current chunks into checkpoint
+                         # Get unit cell info from current chunks - but use individual chunk data
+                         
+                         combine_trajectory_chunks(current_checkpoint_chunks,checkpoint_path) 
 
-                     checkpoint_output_files.append(checkpoint_path)
-                     print(f"Checkpoint saved: {checkpoint_path}")
- 
-                     #Clean up input chunk files too
-                     for j in range(max(0, i - len(current_checkpoint_chunks) + 1), i + 1):
-                            input_chunk_file = os.path.join(temp_dir, f"{output_basename}_input_chunk_{j:04d}.dcd")
-                            if os.path.exists(input_chunk_file):
-                                   os.remove(input_chunk_file)
-                     print(f"Cleaned up {len(current_checkpoint_chunks)} temporary chunk files")
+                         checkpoint_output_files.append(checkpoint_path)
+                         print(f"Checkpoint saved: {checkpoint_path}")
+     
+                         #Clean up input chunk files too
+                         for j in range(max(0, i - len(current_checkpoint_chunks) + 1), i + 1):
+                                input_chunk_file = os.path.join(temp_dir, f"{output_basename}_input_chunk_{j:04d}.dcd")
+                                if os.path.exists(input_chunk_file):
+                                       os.remove(input_chunk_file)
+                         print(f"Cleaned up {len(current_checkpoint_chunks)} temporary chunk files")
 
-                     #reset for next checkpoint
-                     current_checkpoint_chunks = []
-                     processed_chunks = 0
+                         #reset for next checkpoint
+                         current_checkpoint_chunks = []
+                         processed_chunks = 0
        
         timing["forward_pass"] = time.time() - timing["forward_pass"]
         
@@ -542,7 +567,7 @@ def main():
         print("Combining all checkpoints into final trajectory...")
         # Unit cell info will be extracted from individual checkpoints
         log_memory("Before combining checkpoints")
-        combine_trajectory_chunks(
+        combine_checkpoint(
             checkpoint_output_files, reference_pdb_path, arg.out_fn
         )
         log_memory("After combining checkpoints")
