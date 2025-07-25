@@ -253,15 +253,16 @@ def combine_trajectory_chunks(chunk_output, final_output_fn, save_reference_pdb=
             if i == 0:
                n_atoms = chunk_traj.n_atoms
             log_memory(f"After loading, Before writing chunk {i} to checkpoint") 
-           
-            writer.write(chunk_traj.xyz,
-                         cell_lengths=chunk_traj.unitcell_lengths,
+            chunk_traj_xyz_A = chunk_traj.xyz*10 
+            chunk_traj_unitcell_A = chunk_traj.unitcell_lengths*10
+            writer.write(chunk_traj_xyz_A,
+                         cell_lengths=chunk_traj_unitcell_A,
                          cell_angles = chunk_traj.unitcell_angles)
             
             total_frames += len(chunk_traj)
      
             log_memory(f"After writing chunk {i} to checkpoint")
-            del chunk_traj
+            del chunk_traj,chunk_traj_xyz_A,chunk_traj_unitcell_A
             gc.collect()
             
             
@@ -288,12 +289,13 @@ def combine_checkpoint(checkpoint_files,reference_pdb_path, final_output_fn):
 
                         
             with mdtraj.formats.DCDTrajectoryFile(chunk_file,'r') as reader:
-                xyz, cell_lengths, cell_angles = reader.read()
+                xyz, cell_lengths, cell_angles= reader.read()
                 log_memory(f"After loading, Before writing chunk {i} to checkpoint") 
                 writer.write(xyz,
                          cell_lengths=cell_lengths,
                          cell_angles =cell_angles)
-                
+                del xyz,cell_lengths,cell_angles
+                gc.collect() 
             total_frames += len(xyz)
      
             log_memory(f"After writing chunk {i} to checkpoint")
