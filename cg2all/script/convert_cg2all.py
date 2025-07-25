@@ -13,6 +13,8 @@ import gc
 import numpy as np
 import torch
 import dgl
+import ctypes
+import ctypes.util
 
 os.environ["OPENMM_PLUGIN_DIR"] = "/dev/null"
 import mdtraj
@@ -85,6 +87,7 @@ def split_trajectory_into_chunks(pdb_fn, dcd_fn, chunk_size, temp_dir, output_ba
 
         chunk_files.append((pdb_fn, chunk_dcd_fn))
         del chunk_traj
+        gc.collect()
         chunk_idx +=1
 
     return chunk_files
@@ -250,18 +253,20 @@ def combine_trajectory_chunks(chunk_output, final_output_fn, save_reference_pdb=
             if i == 0:
                n_atoms = chunk_traj.n_atoms
             log_memory(f"After loading, Before writing chunk {i} to checkpoint") 
+           
             writer.write(chunk_traj.xyz,
                          cell_lengths=chunk_traj.unitcell_lengths,
                          cell_angles = chunk_traj.unitcell_angles)
-            gc.collect()
+            
             total_frames += len(chunk_traj)
      
             log_memory(f"After writing chunk {i} to checkpoint")
             del chunk_traj
+            gc.collect()
             
             
-            drop_file_cache(final_output_fn)
-            log_memory(f"After output cache for {i} chunk iter")
+#            drop_file_cache(final_output_fn)
+            log_memory(f"After garbage colleciton for  {i} chunk iter")
 
     print(f"Final trajectory: {total_frames} frames, {n_atoms} atoms")
     print(f"Final trajectory saved: {final_output_fn}")
@@ -279,23 +284,24 @@ def combine_checkpoint(checkpoint_files,reference_pdb_path, final_output_fn):
     with mdtraj.formats.DCDTrajectoryFile(final_output_fn,'w') as writer:
         for i,chunk_file in enumerate(tqdm.tqdm(checkpoint_files, desc="Loading chunks")):
             log_memory(f"Before loading chunk {i} to checkpoint") 
-            chunk_traj = mdtraj.load_dcd(chunk_file, top=reference_pdb_path)
+#            chunk_traj = mdtraj.load_dcd(chunk_file, top=reference_pdb_path)
 
-            if i == 0:
-               n_atoms = chunk_traj.n_atoms
-            log_memory(f"After loading, Before writing chunk {i} to checkpoint") 
-            writer.write(chunk_traj.xyz,
-                         cell_lengths=chunk_traj.unitcell_lengths,
-                         cell_angles = chunk_traj.unitcell_angles)
-            total_frames += len(chunk_traj)
+                        
+            with mdtraj.formats.DCDTrajectoryFile(chunk_file,'r') as reader:
+                xyz, cell_lengths, cell_angles = reader.read()
+                log_memory(f"After loading, Before writing chunk {i} to checkpoint") 
+                writer.write(xyz,
+                         cell_lengths=cell_lengths,
+                         cell_angles =cell_angles)
+                
+            total_frames += len(xyz)
      
             log_memory(f"After writing chunk {i} to checkpoint")
-            del chunk_traj
-            
-            drop_file_cache(chunk_file)
-            log_memory(f"After cleaning chunk {i} cache")
-            drop_file_cache(final_output_fn)
-            log_memory(f"After output cache for {i} chunk iter")
+                        
+#            drop_file_cache(chunk_file)
+#            log_memory(f"After cleaning chunk {i} cache")
+#            drop_file_cache(final_output_fn)
+#            log_memory(f"After output cache for {i} chunk iter")
 
     print(f"Final trajectory: {total_frames} frames, {n_atoms} atoms")
     print(f"Final trajectory saved: {final_output_fn}")
@@ -658,9 +664,7 @@ def drop_file_cache(filename):
         os.close(fd)
 
         # Linux: use posix_fadvise to tell OS we don't need this file cached
-        import ctypes
-        import ctypes.util
-
+        
         libc = ctypes.CDLL(ctypes.util.find_library('c'))
         POSIX_FADV_DONTNEED = 4
 
