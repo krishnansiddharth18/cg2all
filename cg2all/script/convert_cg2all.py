@@ -262,13 +262,15 @@ def combine_trajectory_chunks(chunk_output, final_output_fn, save_reference_pdb=
             total_frames += len(chunk_traj)
      
             log_memory(f"After writing chunk {i} to checkpoint")
-            del chunk_traj,chunk_traj_xyz_A,chunk_traj_unitcell_A
+            del chunk_traj_xyz_A,chunk_traj_unitcell_A
             gc.collect()
             
             
 #            drop_file_cache(final_output_fn)
             log_memory(f"After garbage colleciton for  {i} chunk iter")
-
+    del chunk_output
+    log_memory(f"After garbage colleciton for  all chunks ")
+    gc.collect()
     print(f"Final trajectory: {total_frames} frames, {n_atoms} atoms")
     print(f"Final trajectory saved: {final_output_fn}")
 
@@ -294,9 +296,11 @@ def combine_checkpoint(checkpoint_files,reference_pdb_path, final_output_fn):
                 writer.write(xyz,
                          cell_lengths=cell_lengths,
                          cell_angles =cell_angles)
+                chunk_size=len(xyz)
                 del xyz,cell_lengths,cell_angles
+                
                 gc.collect() 
-            total_frames += len(xyz)
+            total_frames += chunk_size
      
             log_memory(f"After writing chunk {i} to checkpoint")
                         
