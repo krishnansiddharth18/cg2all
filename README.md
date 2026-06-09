@@ -30,7 +30,7 @@ pip install git+https://github.com/krishnansiddharth18/cg2all.git
 # This is an example with cudatoolkit=11.3.
 # Set a proper cudatoolkit version that is compatible with your CUDA driver and DGL library.
 # dgl>=1.1 occasionally raises some errors, so please use dgl<=1.0.
-conda create --name cg2all pip cudatoolkit=11.3 dgl=1.0 -c dglteam/label/cu113
+conda create --name cg2all pip cudatoolkit=11.3 dgl=1.0 e3nn=0.5.6 -c dglteam/label/cu113
 ```
 3. Activate the environment
 ```bash
@@ -39,7 +39,7 @@ conda activate cg2all
 4. Install this package
 ```bash
 pip install git+https://github.com/krishnansiddharth18/cg2all.git
-conda install -c conda-forge mdtraj
+conda install -c conda-forge mdtraj==11.1.0 numpy==1.26.4
 ```
 
 #### for cryo_em_minimizer usage
