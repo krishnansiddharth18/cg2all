@@ -39,7 +39,7 @@ conda activate cg2all
 4. Install this package
 ```bash
 pip install git+https://github.com/krishnansiddharth18/cg2all.git
-conda install -c conda-forge mdtraj==11.1.0 numpy==1.26.4
+conda install -c conda-forge mdtraj==1.11.0 numpy==1.26.4
 ```
 
 #### for cryo_em_minimizer usage
